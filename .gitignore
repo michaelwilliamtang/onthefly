@@ -1,0 +1,15 @@
+data/
+joblog/
+*~
+*.pyc
+*.pyo
+*.slurm
+*.sh
+*.pickle
+.ipynb_checkpoints/
+*__pycache__*
+apex/
+SimCSE/
+COS597/
+PPLM/
+DensePhrases/
