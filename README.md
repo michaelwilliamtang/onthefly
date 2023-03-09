@@ -1,4 +1,4 @@
-# onthefly
+# Towards Generalized Control: On-the-Fly In-Topic Generation
 
 Code for paper [Towards Generalized Control: On-the-Fly In-Topic Generation](https://tinyurl.com/onthefly-paper).
 
