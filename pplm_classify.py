@@ -71,7 +71,7 @@ max_length_seq = 100
 ########################
 DEBUG = True
 if DEBUG:
-    n_train = 1000 # number of retrieval candidates to load if DEBUG
+    n_train = 3000 # number of retrieval candidates to load if DEBUG
     n_val = 1 # number of eval queries to run if DEBUG
     ref_epochs = 5
     n_pos_refs = 3
@@ -81,9 +81,10 @@ else:
     ref_epochs = 10
     n_pos_refs = 8
 ref_batch_size = 8
+desc = 'cc_news_text_1000'
 ref_lr = 0.001 # learning rate
 n_sents = 1 # number of sentences per batch for on-the-fly training
-n_neg_refs = 2 * n_pos_refs # actually will just use enough to match the pos refs, so we provide more here
+n_neg_refs = 2 * n_pos_refs + 10 # actually will just use enough to match the pos refs, so we provide more here
 
 PROMPT_TYPE = 0
 n_helpful_prefix_chars = 200 # should basically be large enough to cover the chars in n_helpful_prefix_words
@@ -110,15 +111,15 @@ def filter_dataset(data):
 cc_raw_data = load_dataset('cc_news', split='train')
 n_train_before_filter = len(cc_raw_data)
 cc_raw_data = filter_dataset(cc_raw_data)
-random.shuffle(cc_raw_data)
-print('# raw data examples: {} ({} before filtering)'.format(len(cc_data), n_train_before_filter))
+cc_raw_data = cc_raw_data.shuffle(seed=SEED)
+print('{} total examples ({} before filtering)'.format(len(cc_raw_data), n_train_before_filter))
 
 # split
 assert n_train + n_val <= len(cc_raw_data)
-cc_train = cc[:n_train]
-cc_val = cc[-n_val:]
+cc_data = cc_raw_data.select(range(n_train))
+cc_data_val = cc_raw_data.select(range(len(cc_raw_data)-n_val,len(cc_raw_data)))
 
-print('{} train; {} val'.format(n_train, n_val)
+print('{} train; {} val'.format(n_train, n_val))
 
 ################################################################################################
 # PREP MODELS
@@ -130,27 +131,28 @@ print('Model prep section! ------------')
 sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
 
 # retriever
-if DEBUG:
-    with open('bm25_cc_news_text_re_1000.pickle', 'rb') as f:
-        bm25, tokenized_corpus, corpus = pickle.load(f)
+if recompute_retriever:
+    corpus = [x['text'] for x in cc_data]
+    tokenized_corpus = [nltk.word_tokenize(doc) for doc in corpus]
+    bm25 = BM25Okapi(tokenized_corpus)
+    with open('bm25_' + desc + '.pickle', 'wb') as f:
+        pickle.dump([bm25, tokenized_corpus, corpus], f, protocol=pickle.HIGHEST_PROTOCOL)
 else:
-    with open('bm25_cc_news_text_re.pickle', 'rb') as f:
+    with open('bm25_' + desc + '.pickle', 'rb') as f:
         bm25, tokenized_corpus, corpus = pickle.load(f)
-    # corpus = [x['text'] for x in cc_data]
-    # tokenized_corpus = [re.split(' |\n', doc) for doc in corpus]
-    # bm25 = BM25Okapi(tokenized_corpus)
 
 # pretrained LM
 tokenizer = GPT2Tokenizer.from_pretrained(pretrained_model)
-model = GPT2LMHeadModel.from_pretrained(
+model = GPT2LMHeadModel.from_pretrained(pretrained_model)
+model2 = GPT2LMHeadModel.from_pretrained(
     pretrained_model,
     output_hidden_states=True
 )
-model.to(device)
-model.eval()
+model2.to(device)
+model2.eval()
 
 # freeze GPT-2 weights
-for param in model.parameters():
+for param in model2.parameters():
     param.requires_grad = False
 
 # discriminator architecture for on-the-fly classifier
@@ -161,8 +163,8 @@ discriminator = Discriminator(
     pretrained_model=pretrained_model,
     cached_mode=cached,
     device=device,
-    tokenizer=tokenizer,
-    model=model,
+#     tokenizer=tokenizer,
+#     model=model,
 ).to(device)
 discriminator_meta = {
     "class_size": len(idx2class),
@@ -171,6 +173,7 @@ discriminator_meta = {
     "class_vocab": class2idx,
     "default_class": 0,
 }
+
 
 ################################################################################################
 # UTILITY FUNCTIONS FOR ON-THE-FLY CLASSIFICATION
@@ -337,7 +340,9 @@ def generate_one(query, actual_text):
         if cc_data[i]['title'] not in seen_titles:
             dedup_neighbors.append(i)
             seen_titles.add(cc_data[i]['title'])
-    print('{} -> {}'.format(len(neighbors), len(dedup_neighbors)))
+    print('{} neighbors ({} before dedup)'.format(len(dedup_neighbors), len(neighbors)))
+    print('Neighbor titles:')
+    print(cc_data[dedup_neighbors]['title'])
 
     # create on-the-fly train + test datasets using candidates
     pos_refs = cc_data[dedup_neighbors[:n_pos_refs]]['text']
@@ -374,7 +379,7 @@ def generate_one(query, actual_text):
         prompt = 'Generate a long article based on its title. Title: ' + query + '. Article Text: ' + prefix
 
     generation = run_one_pplm_example(
-            pretrained_model="gpt2-medium",
+            pretrained_model=pretrained_model,
             cond_text=prompt,
             uncond=False,
             bag_of_words=None,
@@ -395,10 +400,12 @@ def generate_one(query, actual_text):
             gamma=1.5,
             gm_scale=0.9,
             kl_scale=0.01,
-            seed=0,
+            seed=SEED,
             no_cuda=False,
             colorama=False,
             verbosity='quiet',
+            tokenizer=None,
+            model=None,
             on_the_fly=True, # NEW PARAMS
             classifier=discriminator.get_classifier(), # NEW PARAMS
             class_id=1, # NEW PARAMS
@@ -449,7 +456,7 @@ X = [x['title'] for x in cc_data_val]
 y = [x['text'] for x in cc_data_val]
 y_hat = [generate_one(X_i, y_i) for X_i, y_i in zip(X, y)]
 
-with open('output_cc_news_text_re_1000.pickle', 'wb') as f:
+with open('output_' + desc + '.pickle', 'wb') as f:
     pickle.dump([X, y, y_hat], f, protocol=pickle.HIGHEST_PROTOCOL)
 
 mauve_score = eval_mauve(y_hat, y)
